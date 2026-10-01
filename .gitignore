@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Build dependencies downloaded by build script
+vendor/
+build_tmp/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Local settings / secrets
+conf/
+config.json
+.env
+.env.*
+*.token
+*.key
+
+# Temporary files
+*.log
+*.tmp
+*.bak
