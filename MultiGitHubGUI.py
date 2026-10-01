@@ -52,6 +52,7 @@ def default_config() -> dict:
         "theme": "System",
         "projects_dir": str(Path.home() / "Documents" / "GitHub"),
         "last_account": "",
+        "repo_paths": {},
         "window": {"width": 1280, "height": 780},
     }
 
@@ -251,6 +252,8 @@ class RepoDialog(ctk.CTkToplevel):
 class MultiGitHubGUI(ctk.CTk):
     def __init__(self):
         self.cfg = load_config()
+        if not isinstance(self.cfg.get("repo_paths"), dict):
+            self.cfg["repo_paths"] = {}
         ctk.set_appearance_mode(self.cfg.get("theme", "System"))
         ctk.set_default_color_theme("blue")
         super().__init__()
@@ -618,19 +621,37 @@ class MultiGitHubGUI(ctk.CTk):
 
     def select_repo(self, repo):
         self.selected_repo = repo
-        self.repo_title.configure(text=repo.get("nameWithOwner") or repo.get("name", ""))
-        self.repo_desc.configure(text=(repo.get("description") or "Keine Beschreibung") +
-                                 f"   ·   {repo.get('visibility', '')}")
+        self.repo_title.configure(
+            text=repo.get("nameWithOwner") or repo.get("name", "")
+        )
+        self.repo_desc.configure(
+            text=(repo.get("description") or "Keine Beschreibung")
+            + f"   ·   {repo.get('visibility', '')}"
+        )
         self.web_btn.configure(state="normal")
+
+        repo_key = repo.get("nameWithOwner") or repo.get("name", "")
+        saved_path = self.cfg.get("repo_paths", {}).get(repo_key, "")
+
+        # Zuerst die dauerhaft gespeicherte Zuordnung verwenden.
+        if saved_path:
+            saved = Path(saved_path)
+            if saved.exists() and (saved / ".git").exists():
+                self.set_local_repo(saved, save_mapping=False)
+                return
+
+        # Fallback: klassischer Projektordner + Repository-Name.
         suggested = Path(self.cfg["projects_dir"]) / repo.get("name", "")
         if (suggested / ".git").exists():
             self.set_local_repo(suggested)
         else:
             self.local_dir = None
-            self.local_label.configure(text="Lokaler Ordner: nicht gefunden")
+            self.local_label.configure(text="Lokaler Ordner: nicht zugeordnet")
             self.folder_btn.configure(state="disabled")
-            self.show_status("Dieses Repository ist im Projektordner noch nicht geklont.\n\n"
-                             "Mit „Klonen“ kannst du es lokal anlegen.")
+            self.show_status(
+                "Für dieses Repository ist noch kein lokaler Ordner zugeordnet.\n\n"
+                "Mit „Lokalen Ordner wählen“ kannst du eine dauerhafte Zuordnung speichern."
+            )
 
     def choose_projects_dir(self):
         selected = filedialog.askdirectory(title="Standardordner für Projekte auswählen",
@@ -834,10 +855,23 @@ class MultiGitHubGUI(ctk.CTk):
 
         self.threaded(work, done)
 
-    def set_local_repo(self, path):
-        self.local_dir = Path(path)
+    def set_local_repo(self, path, save_mapping=True):
+        path = Path(path)
+        self.local_dir = path
         self.local_label.configure(text=f"Lokaler Ordner: {path}")
         self.folder_btn.configure(state="normal")
+
+        if save_mapping and self.selected_repo:
+            repo_key = (
+                self.selected_repo.get("nameWithOwner")
+                or self.selected_repo.get("name")
+                or ""
+            )
+            if repo_key:
+                self.cfg.setdefault("repo_paths", {})
+                self.cfg["repo_paths"][repo_key] = str(path)
+                save_config(self.cfg)
+
         self.refresh_git_status()
 
     def show_status(self, text):
@@ -996,16 +1030,44 @@ class MultiGitHubGUI(ctk.CTk):
             )
             default_branch = (default_branch or "").strip()
 
-            return local_branch, default_branch
+            upstream_code, upstream, _ = run_git(
+                [
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{u}",
+                ],
+                cwd=path,
+                allow_error=True,
+            )
+            upstream = (upstream or "").strip() if upstream_code == 0 else ""
+
+            # Direkt beim Remote prüfen, ob der Zielbranch bereits existiert.
+            _, remote_heads, _ = run_git(
+                ["ls-remote", "--heads", "origin", default_branch or local_branch],
+                cwd=path,
+                allow_error=True,
+                timeout=180,
+            )
+            remote_branch_exists = bool((remote_heads or "").strip())
+
+            return local_branch, default_branch, upstream, remote_branch_exists
 
         def inspected(result):
-            local_branch, default_branch = result
+            local_branch, default_branch, upstream, remote_branch_exists = result
 
-            if (
-                local_branch
-                and default_branch
-                and local_branch != default_branch
-            ):
+            if not local_branch:
+                messagebox.showerror(
+                    "Branch nicht erkannt",
+                    "Der lokale Git-Branch konnte nicht ermittelt werden.",
+                    parent=self,
+                )
+                return
+
+            target_branch = default_branch or local_branch
+
+            # Fall 1: lokal master, GitHub main (oder sonst unterschiedliche Namen)
+            if default_branch and local_branch != default_branch:
                 answer = messagebox.askyesno(
                     "Branch an GitHub anpassen",
                     "Der lokale Branch und der GitHub-Standardbranch unterscheiden sich.\n\n"
@@ -1017,7 +1079,6 @@ class MultiGitHubGUI(ctk.CTk):
                     "Vorhandene lokale Dateien werden dabei nicht gelöscht.",
                     parent=self,
                 )
-
                 if answer:
                     self.reconcile_to_default_branch(
                         local_branch,
@@ -1026,13 +1087,41 @@ class MultiGitHubGUI(ctk.CTk):
                     )
                 return
 
+            # Fall 2: Branchname ist bereits gleich (z. B. main/main), aber es
+            # existiert noch kein Upstream und GitHub hat auf diesem Branch
+            # bereits Commits (typisch README/Lizenz beim Erstellen des Repos).
+            if not upstream and remote_branch_exists:
+                answer = messagebox.askyesno(
+                    "Lokalen und GitHub-Stand verbinden",
+                    f"Der lokale Branch „{local_branch}“ ist noch nicht mit "
+                    f"„origin/{target_branch}“ verbunden.\n\n"
+                    "Auf GitHub existiert dieser Branch bereits, z. B. durch "
+                    "eine dort angelegte README oder Lizenz.\n\n"
+                    "Soll MultiGitHubGUI beide Stände jetzt zusammenführen "
+                    "und anschließend auf GitHub veröffentlichen?\n\n"
+                    "Lokale Dateien werden dabei nicht gelöscht.",
+                    parent=self,
+                )
+                if answer:
+                    self.reconcile_to_default_branch(
+                        local_branch,
+                        target_branch,
+                        repo_name,
+                    )
+                return
+
+            # Fall 3: Noch kein Upstream und Remote-Branch existiert nicht:
+            # normaler erster Push.
             self.git_action(["push"], "Push abgeschlossen.")
 
         self.threaded(
             inspect,
             inspected,
-            busy_title="Branch wird geprüft …",
-            busy_detail="MultiGitHubGUI prüft den lokalen Branch und den GitHub-Standardbranch.",
+            busy_title="Push wird vorbereitet …",
+            busy_detail=(
+                "MultiGitHubGUI prüft Branch, Upstream und den vorhandenen "
+                "GitHub-Stand. Bitte warten."
+            ),
         )
 
     def reconcile_to_default_branch(self, old_branch, default_branch, repo_name):
