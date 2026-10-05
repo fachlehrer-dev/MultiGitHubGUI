@@ -895,6 +895,8 @@ class MultiGitHubGUI(ctk.CTk):
 
             branch = git_text(["rev-parse", "--abbrev-ref", "HEAD"], "unbekannt")
             remote = git_text(["remote", "get-url", "origin"], "kein origin")
+            git_user = git_text(["config", "--local", "user.name"], "nicht gesetzt")
+            git_email = git_text(["config", "--local", "user.email"], "nicht gesetzt")
             upstream = git_text(
                 ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
                 "keiner",
@@ -940,6 +942,8 @@ class MultiGitHubGUI(ctk.CTk):
             lines = [
                 f"Branch:              {branch}",
                 f"Remote origin:       {remote}",
+                f"Commit-User:         {git_user}",
+                f"Commit-E-Mail:       {git_email}",
                 f"Upstream:            {upstream}",
                 f"Letzter Commit:       {last_commit}",
                 f"Dateien im Commit:    {tracked_text}",
@@ -962,6 +966,78 @@ class MultiGitHubGUI(ctk.CTk):
 
         self.threaded(work, done)
 
+    def ensure_owner_account(self):
+        if not self.selected_repo:
+            raise RuntimeError("Bitte zuerst ein GitHub-Repository auswählen.")
+
+        repo_name = (
+            self.selected_repo.get("nameWithOwner")
+            or self.selected_repo.get("name")
+            or ""
+        )
+        if "/" not in repo_name:
+            raise RuntimeError("Der Repository-Owner konnte nicht ermittelt werden.")
+
+        repo_owner = repo_name.split("/", 1)[0]
+        selected_account = (self.account_menu.get() or "").strip()
+
+        if not selected_account or selected_account == "Kein Konto":
+            raise RuntimeError("Bitte zuerst ein GitHub-Konto auswählen.")
+
+        if selected_account.lower() != repo_owner.lower():
+            raise RuntimeError(
+                "Sicherheitsprüfung fehlgeschlagen.\n\n"
+                f"Ausgewählter Account: {selected_account}\n"
+                f"Repository-Owner:      {repo_owner}\n\n"
+                "Commit und Push sind nur mit dem Repository-Owner erlaubt."
+            )
+
+        run_gh(
+            [
+                "auth",
+                "switch",
+                "--hostname",
+                HOST,
+                "--user",
+                repo_owner,
+            ]
+        )
+
+        return repo_owner, repo_name
+
+    def configure_commit_identity(self):
+        if not self.local_dir:
+            raise RuntimeError("Kein lokales Repository ausgewählt.")
+
+        repo_owner, _ = self.ensure_owner_account()
+
+        _, raw, _ = run_gh(["api", "user"])
+        try:
+            user_data = json.loads(raw or "{}")
+        except Exception:
+            user_data = {}
+
+        login = str(user_data.get("login") or repo_owner).strip()
+        user_id = str(user_data.get("id") or "").strip()
+        display_name = str(user_data.get("name") or login).strip()
+
+        if login.lower() != repo_owner.lower():
+            raise RuntimeError(
+                "GitHub CLI verwendet nicht den erwarteten Repository-Owner.\n\n"
+                f"Erwartet: {repo_owner}\n"
+                f"Aktiv:    {login}"
+            )
+
+        if user_id:
+            email = f"{user_id}+{login}@users.noreply.github.com"
+        else:
+            email = f"{login}@users.noreply.github.com"
+
+        run_git(["config", "--local", "user.name", display_name], cwd=self.local_dir)
+        run_git(["config", "--local", "user.email", email], cwd=self.local_dir)
+
+        return login, display_name, email
+
     def commit_changes(self):
         if not self.local_dir:
             messagebox.showinfo("Commit", "Bitte zuerst ein lokales Repository wählen.", parent=self)
@@ -972,12 +1048,21 @@ class MultiGitHubGUI(ctk.CTk):
             return
         path = self.local_dir
         def work():
+            login, display_name, email = self.configure_commit_identity()
             run_git(["add", "-A"], cwd=path)
             run_git(["commit", "-m", msg], cwd=path)
-            return True
-        def done(_):
+            return {
+                "login": login,
+                "display_name": display_name,
+                "email": email,
+            }
+        def done(identity):
             self.commit_entry.delete(0, "end")
             self.refresh_git_status()
+            if identity:
+                self.set_footer(
+                    f"Commit erstellt als {identity.get('login', '')}."
+                )
         self.threaded(
             work,
             done,
@@ -1007,6 +1092,17 @@ class MultiGitHubGUI(ctk.CTk):
             or self.selected_repo.get("name")
             or ""
         )
+
+        try:
+            repo_owner, _ = self.ensure_owner_account()
+        except Exception as exc:
+            messagebox.showerror(
+                "Push blockiert",
+                str(exc),
+                parent=self,
+            )
+            self.set_footer("Push blockiert: falscher GitHub-Account.")
+            return
 
         def inspect():
             _, local_branch, _ = run_git(
@@ -1287,6 +1383,18 @@ class MultiGitHubGUI(ctk.CTk):
             return
 
         path = self.local_dir
+
+        if args and args[0].lower() == "push":
+            try:
+                self.ensure_owner_account()
+            except Exception as exc:
+                messagebox.showerror(
+                    "Push blockiert",
+                    str(exc),
+                    parent=self,
+                )
+                self.set_footer("Push blockiert: falscher GitHub-Account.")
+                return
         action = args[0].lower() if args else "git"
 
         if action == "push":
