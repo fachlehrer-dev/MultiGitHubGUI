@@ -422,7 +422,7 @@ class MultiGitHubGUI(ctk.CTk):
         self.footer = ctk.CTkLabel(right, text="", anchor="w", font=ctk.CTkFont(size=12))
         self.footer.grid(row=9, column=0, padx=24, pady=(0, 10), sticky="ew")
 
-    def update_workflow(self, changed_count=0, ahead=None, behind=None):
+    def update_workflow(self, changed_count=0, ahead=None, behind=None, upstream="keiner", has_commit=False):
         if not self.local_dir:
             self.workflow_step1.configure(text="○  1. Änderungen prüfen\n    Kein lokales Repository ausgewählt")
             self.workflow_step2.configure(text="○  2. Commit erstellen\n    Wartet auf Repository")
@@ -433,6 +433,7 @@ class MultiGitHubGUI(ctk.CTk):
 
         ahead_num = int(ahead) if str(ahead).isdigit() else 0
         behind_num = int(behind) if str(behind).isdigit() else 0
+        no_upstream = not upstream or upstream == "keiner"
 
         if changed_count > 0:
             word = "Datei" if changed_count == 1 else "Dateien"
@@ -441,10 +442,18 @@ class MultiGitHubGUI(ctk.CTk):
             self.commit_btn.configure(state="normal")
         else:
             self.workflow_step1.configure(text="✓  1. Keine offenen Änderungen\n    Arbeitsverzeichnis ist sauber")
-            self.workflow_step2.configure(text="✓  2. Commit-Stand geprüft\n    Keine uncommitteten Änderungen")
+            if has_commit:
+                self.workflow_step2.configure(text="✓  2. Commit erstellt\n    Lokaler Commit ist vorhanden")
+            else:
+                self.workflow_step2.configure(text="○  2. Commit erstellen\n    Noch kein Commit vorhanden")
             self.commit_btn.configure(state="disabled")
 
-        if ahead_num > 0:
+        # Wichtig: Ein vorhandener lokaler Commit ohne Upstream ist NICHT synchron.
+        # Das ist der typische erste Push eines neu verbundenen Repositories.
+        if has_commit and no_upstream and changed_count == 0:
+            self.workflow_step3.configure(text="●  3. Auf GitHub pushen\n    Initialer Push ausstehend")
+            self.push_btn.configure(state="normal")
+        elif ahead_num > 0:
             word = "Commit wartet" if ahead_num == 1 else "Commits warten"
             self.workflow_step3.configure(text=f"●  3. Auf GitHub pushen\n    {ahead_num} {word} auf Push")
             self.push_btn.configure(state="normal")
@@ -453,6 +462,9 @@ class MultiGitHubGUI(ctk.CTk):
             self.push_btn.configure(state="disabled")
         elif changed_count > 0:
             self.workflow_step3.configure(text="○  3. Auf GitHub pushen\n    Wartet auf Commit")
+            self.push_btn.configure(state="disabled")
+        elif not has_commit:
+            self.workflow_step3.configure(text="○  3. Auf GitHub pushen\n    Wartet auf ersten Commit")
             self.push_btn.configure(state="disabled")
         else:
             self.workflow_step3.configure(text="✓  3. Mit GitHub synchron\n    Nichts zu pushen")
@@ -980,6 +992,8 @@ class MultiGitHubGUI(ctk.CTk):
             git_user = git_text(["config", "--local", "user.name"], "nicht gesetzt")
             git_email = git_text(["config", "--local", "user.email"], "nicht gesetzt")
             upstream = git_text(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], "keiner")
+            commit_code, _, _ = run_git(["rev-parse", "--verify", "HEAD"], cwd=path, allow_error=True)
+            has_commit = commit_code == 0
             last_commit = git_text(["log", "-1", "--pretty=format:%h  %s"], "noch kein Commit")
 
             code, tracked_out, _ = run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=path, allow_error=True)
@@ -1006,17 +1020,30 @@ class MultiGitHubGUI(ctk.CTk):
                 f"Upstream:            {upstream}",
                 f"Letzter Commit:       {last_commit}",
                 f"Dateien im Commit:    {tracked_text}",
-                f"Commits zu pushen:    {ahead}",
+                f"Commits zu pushen:    {'Initialer Push' if has_commit and upstream == 'keiner' else ahead}",
                 f"Von Remote zu holen:  {behind}",
                 "",
                 "Arbeitsverzeichnis:",
                 short_status if short_status else "sauber – keine uncommitteten Änderungen",
             ]
-            return {"text": "\n".join(lines), "changed": changed_count, "ahead": ahead, "behind": behind}
+            return {
+                "text": "\n".join(lines),
+                "changed": changed_count,
+                "ahead": ahead,
+                "behind": behind,
+                "upstream": upstream,
+                "has_commit": has_commit,
+            }
 
         def done(result):
             self.show_status(result["text"])
-            self.update_workflow(result["changed"], result["ahead"], result["behind"])
+            self.update_workflow(
+                result["changed"],
+                result["ahead"],
+                result["behind"],
+                result["upstream"],
+                result["has_commit"],
+            )
             self.set_footer("Git-Status aktualisiert.")
 
         self.threaded(work, done)
