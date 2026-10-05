@@ -1,25 +1,31 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 .venv/
 venv/
+env/
 
-# PyInstaller
+# PyInstaller / build output
 build/
 dist/
 *.spec
 
-# Build dependencies downloaded by build script
+# Downloaded build dependencies and cache
 vendor/
 build_tmp/
 
-# Editors / OS
+# IDE / editors
 .vscode/
 .idea/
+*.code-workspace
+
+# Windows
 Thumbs.db
 Desktop.ini
 
-# Local settings / secrets
+# Local configuration / credentials / secrets
 conf/
 config.json
 .env
@@ -27,7 +33,7 @@ config.json
 *.token
 *.key
 
-# Temporary files
+# Logs / temporary files
 *.log
 *.tmp
 *.bak

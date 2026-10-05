@@ -149,18 +149,19 @@ if errorlevel 1 (
 )
 
 echo.
-echo [5/7] Python-Datei pruefen...
+echo [5/7] Python-Datei und Icon pruefen...
+if not exist "MultiGitHubGUI.ico" (
+    echo [FEHLER] MultiGitHubGUI.ico wurde nicht gefunden.
+    goto :fail
+)
 %PY% -m py_compile MultiGitHubGUI.py
 if errorlevel 1 goto :fail
 
 echo.
-echo [6/7] CustomTkinter-Pfad ermitteln...
-for /f "usebackq delims=" %%I in (`%PY% -c "import customtkinter,os; print(os.path.dirname(customtkinter.__file__))"`) do set "CTK=%%I"
-
-if not defined CTK (
-    echo [FEHLER] CustomTkinter-Pfad konnte nicht ermittelt werden.
-    goto :fail
-)
+echo [6/7] Build fuer schnelleren Programmstart vorbereiten...
+echo        CustomTkinter-Ressourcen werden nur einmal eingebunden.
+echo        Das Laufzeit-Icon steckt bereits als Base64 in MultiGitHubGUI.py.
+echo.
 
 echo.
 echo [7/7] Einzelne EXE bauen...
@@ -174,10 +175,11 @@ if exist "MultiGitHubGUI.spec" del /q "MultiGitHubGUI.spec"
   --clean ^
   --onefile ^
   --windowed ^
+  --noupx ^
   --name "MultiGitHubGUI" ^
+  --icon "MultiGitHubGUI.ico" ^
   --add-data "vendor\gh;vendor\gh" ^
   --add-data "vendor\mingit;vendor\mingit" ^
-  --add-data "%CTK%;customtkinter" ^
   --collect-data customtkinter ^
   MultiGitHubGUI.py
 
